@@ -259,7 +259,9 @@ function findOrderBlocks(c: Candle[], events: StructureEvent[]) {
 function findLiquidity(c: Candle[], pivots: Pivot[]) {
   const highs = pivots.filter((p) => p.kind === "high");
   const lows = pivots.filter((p) => p.kind === "low");
-  const tol = (Math.max(...c.map((x) => x.high)) - Math.min(...c.map((x) => x.low))) * 0.001;
+  // tolerance للتجميع: ~0.05% من السعر (≈ $2 على الذهب) عشان نلتقط Equal Highs/Lows صح
+  const avg = c.reduce((s, x) => s + x.close, 0) / c.length;
+  const tol = Math.max(avg * 0.0005, 0.5);
 
   function clusters(ps: Pivot[]) {
     const used = new Array(ps.length).fill(false);
@@ -368,8 +370,15 @@ export async function getSignal(interval = "15m") {
   if (bullFVG && !bearFVG) { score += 1; reasons.push("FVG صاعد غير مملوء — دعم للصعود"); }
   if (bearFVG && !bullFVG) { score -= 1; reasons.push("FVG هابط غير مملوء — ضغط للهبوط"); }
 
-  const nearestBSL = a.liquidity.BSL[0]?.level;
-  const nearestSSL = a.liquidity.SSL[0]?.level;
+  // اختيار المستويات بالاتجاه الصح: الهدف فوق السعر للونج وتحت السعر للشورت
+  const above = (arr: number[]) => arr.filter((x) => Number.isFinite(x) && x > price).sort((a, b) => a - b)[0];
+  const below = (arr: number[]) => arr.filter((x) => Number.isFinite(x) && x < price).sort((a, b) => b - a)[0];
+
+  const bslLevels = a.liquidity.BSL.map((x) => x.level);
+  const sslLevels = a.liquidity.SSL.map((x) => x.level);
+  // BSL/SSL الأقرب في الاتجاه الصح (فوق/تحت السعر)
+  const nearestBSL = above([...bslLevels, ...a.resistances, a.weakHigh ?? NaN, a.range.high]) ?? a.range.high;
+  const nearestSSL = below([...sslLevels, ...a.supports, a.weakLow ?? NaN, a.range.low]) ?? a.range.low;
 
   let signal: string;
   if (score >= 2) signal = "LONG";
@@ -378,13 +387,13 @@ export async function getSignal(interval = "15m") {
 
   let entryZone: string | null = null, stop: number | null = null, target: number | null = null;
   if (signal === "LONG") {
-    entryZone = bullOB ? `${bullOB.bottom}-${bullOB.top}` : `قرب الدعم ${a.supports[0] ?? a.strongLow ?? a.range.low}`;
-    stop = a.strongLow ?? a.supports[0] ?? a.range.low;
-    target = nearestBSL ?? a.weakHigh ?? a.resistances[0] ?? a.range.high;
+    entryZone = bullOB ? `${bullOB.bottom}-${bullOB.top}` : `قرب الدعم ${below([...a.supports, a.strongLow ?? NaN]) ?? a.range.low}`;
+    stop = below([...a.supports, a.strongLow ?? NaN, ...sslLevels]) ?? a.range.low; // الستوب تحت السعر
+    target = nearestBSL; // الهدف فوق السعر
   } else if (signal === "SHORT") {
-    entryZone = bearOB ? `${bearOB.bottom}-${bearOB.top}` : `قرب المقاومة ${a.resistances[0] ?? a.strongHigh ?? a.range.high}`;
-    stop = a.strongHigh ?? a.resistances[0] ?? a.range.high;
-    target = nearestSSL ?? a.weakLow ?? a.supports[0] ?? a.range.low;
+    entryZone = bearOB ? `${bearOB.bottom}-${bearOB.top}` : `قرب المقاومة ${above([...a.resistances, a.strongHigh ?? NaN]) ?? a.range.high}`;
+    stop = above([...a.resistances, a.strongHigh ?? NaN, ...bslLevels]) ?? a.range.high; // الستوب فوق السعر
+    target = nearestSSL; // الهدف تحت السعر
   }
 
   return {
