@@ -370,30 +370,37 @@ export async function getSignal(interval = "15m") {
   if (bullFVG && !bearFVG) { score += 1; reasons.push("FVG صاعد غير مملوء — دعم للصعود"); }
   if (bearFVG && !bullFVG) { score -= 1; reasons.push("FVG هابط غير مملوء — ضغط للهبوط"); }
 
-  // اختيار المستويات بالاتجاه الصح: الهدف فوق السعر للونج وتحت السعر للشورت
-  const above = (arr: number[]) => arr.filter((x) => Number.isFinite(x) && x > price).sort((a, b) => a - b)[0];
-  const below = (arr: number[]) => arr.filter((x) => Number.isFinite(x) && x < price).sort((a, b) => b - a)[0];
+  // ===== بناء خطة الصفقة =====
+  const above = (arr: number[]) => arr.filter((x) => Number.isFinite(x) && x > price).sort((a, b) => a - b);
+  const below = (arr: number[]) => arr.filter((x) => Number.isFinite(x) && x < price).sort((a, b) => b - a);
 
   const bslLevels = a.liquidity.BSL.map((x) => x.level);
   const sslLevels = a.liquidity.SSL.map((x) => x.level);
-  // BSL/SSL الأقرب في الاتجاه الصح (فوق/تحت السعر)
-  const nearestBSL = above([...bslLevels, ...a.resistances, a.weakHigh ?? NaN, a.range.high]) ?? a.range.high;
-  const nearestSSL = below([...sslLevels, ...a.supports, a.weakLow ?? NaN, a.range.low]) ?? a.range.low;
+  // أهداف ذات معنى = سيولة متجمّعة (Equal Highs/Lows) مش أي pivot صغير
+  const bslPools = a.liquidity.BSL.filter((x) => x.count >= 2).map((x) => x.level);
+  const sslPools = a.liquidity.SSL.filter((x) => x.count >= 2).map((x) => x.level);
+  const nearestBSL = above([...bslLevels, ...a.resistances, a.weakHigh ?? NaN, a.range.high])[0] ?? a.range.high;
+  const nearestSSL = below([...sslLevels, ...a.supports, a.weakLow ?? NaN, a.range.low])[0] ?? a.range.low;
 
   let signal: string;
   if (score >= 2) signal = "LONG";
   else if (score <= -2) signal = "SHORT";
   else signal = "WAIT";
 
-  let entryZone: string | null = null, stop: number | null = null, target: number | null = null;
+  let entryZone: string | null = null, stop: number | null = null, target: number | null = null, riskReward: number | null = null;
   if (signal === "LONG") {
-    entryZone = bullOB ? `${bullOB.bottom}-${bullOB.top}` : `قرب الدعم ${below([...a.supports, a.strongLow ?? NaN]) ?? a.range.low}`;
-    stop = below([...a.supports, a.strongLow ?? NaN, ...sslLevels]) ?? a.range.low; // الستوب تحت السعر
-    target = nearestBSL; // الهدف فوق السعر
+    const entry = bullOB ? round((bullOB.bottom + bullOB.top) / 2) : price;
+    stop = below([...a.supports, a.strongLow ?? NaN, ...sslLevels])[0] ?? a.range.low; // الستوب تحت السعر
+    // الهدف: أقرب سيولة متجمّعة فوق السعر (Equal Highs) وإلا قمة ضعيفة/قمة الرنج
+    target = above([...bslPools, a.weakHigh ?? NaN, a.range.high])[0] ?? a.range.high;
+    entryZone = bullOB ? `${bullOB.bottom}-${bullOB.top}` : `قرب الدعم ${stop}`;
+    if (target != null && stop != null && entry !== stop) riskReward = round(Math.abs(target - entry) / Math.abs(entry - stop));
   } else if (signal === "SHORT") {
-    entryZone = bearOB ? `${bearOB.bottom}-${bearOB.top}` : `قرب المقاومة ${above([...a.resistances, a.strongHigh ?? NaN]) ?? a.range.high}`;
-    stop = above([...a.resistances, a.strongHigh ?? NaN, ...bslLevels]) ?? a.range.high; // الستوب فوق السعر
-    target = nearestSSL; // الهدف تحت السعر
+    const entry = bearOB ? round((bearOB.bottom + bearOB.top) / 2) : price;
+    stop = above([...a.resistances, a.strongHigh ?? NaN, ...bslLevels])[0] ?? a.range.high; // الستوب فوق السعر
+    target = below([...sslPools, a.weakLow ?? NaN, a.range.low])[0] ?? a.range.low;
+    entryZone = bearOB ? `${bearOB.bottom}-${bearOB.top}` : `قرب المقاومة ${stop}`;
+    if (target != null && stop != null && entry !== stop) riskReward = round(Math.abs(target - entry) / Math.abs(entry - stop));
   }
 
   return {
@@ -401,7 +408,7 @@ export async function getSignal(interval = "15m") {
     signal,
     score,
     reasons,
-    plan: { entryZone, stop, target, nearestBSL, nearestSSL },
+    plan: { entryZone, stop, target, riskReward, nearestBSL, nearestSSL },
     disclaimer: "تحليل تعليمي احتمالي مبني على بيانات تاريخية — مش توصية مالية. الستوب إجباري وإدارة المخاطر مسئوليتك.",
   };
 }
