@@ -382,6 +382,17 @@ export async function getSignal(interval = "15m") {
   const nearestBSL = above([...bslLevels, ...a.resistances, a.weakHigh ?? NaN, a.range.high])[0] ?? a.range.high;
   const nearestSSL = below([...sslLevels, ...a.supports, a.weakLow ?? NaN, a.range.low])[0] ?? a.range.low;
 
+  const MIN_RR = 1.5;
+  // يختار أقرب هدف يحقق نسبة عائد/مخاطرة >= MIN_RR، وإلا أبعد هدف متاح
+  function pickTarget(cands: number[], entry: number, stopLevel: number, dir: "up" | "down"): number | null {
+    const risk = Math.abs(entry - stopLevel);
+    const valid = dir === "up"
+      ? cands.filter((x) => Number.isFinite(x) && x > entry).sort((a, b) => a - b)
+      : cands.filter((x) => Number.isFinite(x) && x < entry).sort((a, b) => b - a);
+    if (valid.length === 0) return null;
+    return valid.find((t) => Math.abs(t - entry) >= risk * MIN_RR) ?? valid[valid.length - 1];
+  }
+
   let signal: string;
   if (score >= 2) signal = "LONG";
   else if (score <= -2) signal = "SHORT";
@@ -391,16 +402,22 @@ export async function getSignal(interval = "15m") {
   if (signal === "LONG") {
     const entry = bullOB ? round((bullOB.bottom + bullOB.top) / 2) : price;
     stop = below([...a.supports, a.strongLow ?? NaN, ...sslLevels])[0] ?? a.range.low; // الستوب تحت السعر
-    // الهدف: أقرب سيولة متجمّعة فوق السعر (Equal Highs) وإلا قمة ضعيفة/قمة الرنج
-    target = above([...bslPools, a.weakHigh ?? NaN, a.range.high])[0] ?? a.range.high;
+    // الهدف: أقرب سيولة/مقاومة فوق السعر تحقق R:R كويسة
+    target = pickTarget([...bslPools, ...a.resistances, a.weakHigh ?? NaN, a.range.high], entry, stop ?? a.range.low, "up");
     entryZone = bullOB ? `${bullOB.bottom}-${bullOB.top}` : `قرب الدعم ${stop}`;
     if (target != null && stop != null && entry !== stop) riskReward = round(Math.abs(target - entry) / Math.abs(entry - stop));
   } else if (signal === "SHORT") {
     const entry = bearOB ? round((bearOB.bottom + bearOB.top) / 2) : price;
     stop = above([...a.resistances, a.strongHigh ?? NaN, ...bslLevels])[0] ?? a.range.high; // الستوب فوق السعر
-    target = below([...sslPools, a.weakLow ?? NaN, a.range.low])[0] ?? a.range.low;
+    target = pickTarget([...sslPools, ...a.supports, a.weakLow ?? NaN, a.range.low], entry, stop ?? a.range.high, "down");
     entryZone = bearOB ? `${bearOB.bottom}-${bearOB.top}` : `قرب المقاومة ${stop}`;
     if (target != null && stop != null && entry !== stop) riskReward = round(Math.abs(target - entry) / Math.abs(entry - stop));
+  }
+
+  // فلتر الجودة: لو أفضل هدف متاح بيدي R:R أقل من MIN_RR → الإشارة ضعيفة → WAIT
+  if ((signal === "LONG" || signal === "SHORT") && riskReward != null && riskReward < MIN_RR) {
+    reasons.push(`⚠️ R:R = ${riskReward} أقل من ${MIN_RR} — الأفضل تنتظر سعر دخول أحسن (WAIT)`);
+    signal = "WAIT";
   }
 
   return {
